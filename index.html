@@ -45,13 +45,13 @@
         <!-- Header -->
         <header class="text-center mb-8">
             <h1 class="text-3xl sm:text-4xl font-bold text-white">After Effects Expression Store</h1>
-            <p class="text-gray-400 mt-2">Your personal, cloud-synced collection of AE expressions.</p>
+            <p class="text-gray-400 mt-2">A public collection of AE expressions.</p>
         </header>
 
-        <!-- Add Expression Form -->
-        <div class="bg-gray-800 p-6 rounded-lg shadow-lg mb-8 max-w-4xl mx-auto">
+        <!-- Admin Controls Section (hidden by default) -->
+        <div id="admin-controls" class="hidden bg-gray-800 p-6 rounded-lg shadow-lg mb-8 max-w-4xl mx-auto">
             <form id="add-expression-form">
-                <h2 class="text-2xl font-semibold text-white mb-4">Add New Expression</h2>
+                <h2 class="text-2xl font-semibold text-white mb-4">Admin: Add New Expression</h2>
                 <div class="mb-4">
                     <label for="expression-title" class="block text-sm font-medium text-gray-300 mb-1">Title</label>
                     <input type="text" id="expression-title" name="title" required
@@ -71,6 +71,13 @@
             </form>
         </div>
 
+        <!-- Search Box -->
+        <div class="mb-8 max-w-4xl mx-auto">
+             <label for="search-box" class="block text-sm font-medium text-gray-300 mb-1">Search Expressions</label>
+            <input type="text" id="search-box" placeholder="Search by title or code..." class="w-full bg-gray-700 text-white border border-gray-600 rounded-md px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition">
+        </div>
+
+
         <!-- Expressions Grid -->
         <div id="expressions-container" class="grid grid-cols-1 md:grid-cols-2 gap-6">
             <!-- Expression cards will be injected here by JavaScript -->
@@ -83,7 +90,7 @@
         
         <!-- User ID Display -->
         <div class="text-center mt-8">
-            <p class="text-gray-500 text-sm">Your User ID (for sharing/syncing): <code id="user-id-display" class="bg-gray-700 p-1 rounded">Loading...</code></p>
+            <p class="text-gray-500 text-sm">Your User ID: <code id="user-id-display" class="bg-gray-700 p-1 rounded">Loading...</code></p>
         </div>
 
     </div>
@@ -113,10 +120,12 @@
         import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, collection, addDoc, onSnapshot, doc, deleteDoc, query } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
+        // --- IMPORTANT: SET YOUR ADMIN USER ID HERE ---
+        // This MUST match the userId you put in your Firestore security rules.
+        const OWNER_USER_ID = "PASTE_YOUR_USER_ID_HERE"; 
+
         // --- Firebase Configuration and Initialization ---
-        // This line is a fallback for the collaborative environment. 
-        // The object below is YOUR configuration.
-        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
+        const firebaseConfig = {
             apiKey: "AIzaSyA9uBUt0A_KpHmm2HWusTsJ-7fXGy3BVTw",
             authDomain: "after-effect-expression-store.firebaseapp.com",
             projectId: "after-effect-expression-store",
@@ -132,15 +141,18 @@
         const db = getFirestore(app);
 
         // --- State Management ---
-        let expressions = [];
+        let allExpressions = []; // All expressions from Firestore
+        let filteredExpressions = []; // Expressions after search/filter
         let currentPage = 1;
         const expressionsPerPage = 20;
         let userId = null;
-        let unsubscribe = null; // To hold the onSnapshot listener
-        let expressionIdToDelete = null; // To hold ID for modal confirmation
+        let unsubscribe = null; 
+        let expressionIdToDelete = null;
 
         // --- DOM Elements ---
         const form = document.getElementById('add-expression-form');
+        const adminControls = document.getElementById('admin-controls');
+        const searchBox = document.getElementById('search-box');
         const container = document.getElementById('expressions-container');
         const paginationControls = document.getElementById('pagination-controls');
         const notificationToast = document.getElementById('notification-toast');
@@ -153,21 +165,24 @@
         // --- Authentication ---
         onAuthStateChanged(auth, async (user) => {
             if (user) {
-                console.log("User is signed in with UID:", user.uid);
                 userId = user.uid;
+                console.log("Authentication successful. User ID:", userId);
                 userIdDisplay.textContent = userId;
+                
+                // Show admin controls if the user is the owner
+                if(userId === OWNER_USER_ID) {
+                    adminControls.classList.remove('hidden');
+                }
+
+                // Everyone listens for data after signing in
                 listenForExpressions();
             } else {
-                console.log("No user signed in, attempting to sign in...");
+                console.log("No user signed in. Attempting to sign in anonymously...");
                 userIdDisplay.textContent = 'Authenticating...';
                 try {
-                     if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                        await signInWithCustomToken(auth, __initial_auth_token);
-                     } else {
-                        await signInAnonymously(auth);
-                     }
+                    await signInAnonymously(auth);
                 } catch (error) {
-                    console.error("Error signing in:", error);
+                    console.error("Anonymous sign-in failed:", error);
                     userIdDisplay.textContent = 'Authentication Failed';
                 }
             }
@@ -175,22 +190,44 @@
 
         // --- Firestore Data Listener ---
         function listenForExpressions() {
-            if (!userId) return;
             if (unsubscribe) unsubscribe();
+            if (!userId) {
+                console.error("listenForExpressions called without a user ID. Aborting data fetch.");
+                return;
+            }
             
-            const expressionsCollectionPath = `artifacts/${appId}/users/${userId}/expressions`;
-            const q = query(collection(db, expressionsCollectionPath));
+            const publicExpressionsPath = `artifacts/${appId}/public/data/expressions`;
+            console.log("Attempting to listen for data at path:", publicExpressionsPath);
+            
+            const q = query(collection(db, publicExpressionsPath));
 
             unsubscribe = onSnapshot(q, (snapshot) => {
-                expressions = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-                expressions.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-                render();
+                allExpressions = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                allExpressions.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+                
+                // Apply current search filter and re-render
+                filterAndRender();
             }, (error) => {
                 console.error("Error fetching expressions:", error);
+                container.innerHTML = `<p class="text-red-400 md:col-span-2 text-center">Error: Could not fetch expressions. Check Firestore rules and permissions.</p>`;
             });
         }
         
-        // --- Rendering Logic ---
+        // --- Search and Rendering Logic ---
+        function filterAndRender() {
+            const searchTerm = searchBox.value.toLowerCase();
+            if (searchTerm) {
+                filteredExpressions = allExpressions.filter(expr => 
+                    expr.title.toLowerCase().includes(searchTerm) || 
+                    expr.code.toLowerCase().includes(searchTerm)
+                );
+            } else {
+                filteredExpressions = allExpressions;
+            }
+            currentPage = 1; // Reset to first page on new search
+            render();
+        }
+
         function render() {
             renderExpressions();
             renderPagination();
@@ -199,17 +236,30 @@
         function renderExpressions() {
             container.innerHTML = ''; 
             
-            if (expressions.length === 0) {
-                 container.innerHTML = `<p class="text-gray-400 md:col-span-2 text-center">No expressions yet. Add one using the form above!</p>`;
+            if (filteredExpressions.length === 0 && allExpressions.length > 0) {
+                 container.innerHTML = `<p class="text-gray-400 md:col-span-2 text-center">No expressions match your search.</p>`;
+                 return;
+            }
+            if (allExpressions.length === 0){
+                // This condition is met while data is loading or if there are no expressions.
+                // The onSnapshot error handler will display a more specific message if loading fails.
+                 container.innerHTML = `<p class="text-gray-400 md:col-span-2 text-center">Loading expressions...</p>`;
                  return;
             }
 
             const startIndex = (currentPage - 1) * expressionsPerPage;
-            const paginatedExpressions = expressions.slice(startIndex, startIndex + expressionsPerPage);
+            const paginatedExpressions = filteredExpressions.slice(startIndex, startIndex + expressionsPerPage);
+            const isOwner = userId === OWNER_USER_ID;
 
             paginatedExpressions.forEach(expr => {
                 const card = document.createElement('div');
                 card.className = 'bg-gray-800 p-5 rounded-lg shadow-md flex flex-col expression-card';
+                
+                // Conditionally add delete button for owner
+                const deleteButtonHTML = isOwner ? 
+                    `<button data-id="${expr.id}" class="delete-btn bg-red-600 hover:bg-red-700 text-white font-semibold py-2 px-3 rounded-md text-sm transition-colors">Delete</button>` :
+                    '';
+
                 card.innerHTML = `
                     <div class="flex-grow">
                         <h3 class="text-xl font-bold text-white mb-2 truncate">${escapeHTML(expr.title)}</h3>
@@ -219,7 +269,7 @@
                     </div>
                     <div class="mt-4 flex items-center space-x-2">
                         <button data-code="${escapeHTML(expr.code)}" class="copy-btn flex-1 bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-3 rounded-md text-sm transition-colors">Copy</button>
-                        <button data-id="${expr.id}" class="delete-btn bg-red-600 hover:bg-red-700 text-white font-semibold py-2 px-3 rounded-md text-sm transition-colors">Delete</button>
+                        ${deleteButtonHTML}
                     </div>
                 `;
                 container.appendChild(card);
@@ -228,7 +278,7 @@
         
         function renderPagination() {
             paginationControls.innerHTML = '';
-            const pageCount = Math.ceil(expressions.length / expressionsPerPage);
+            const pageCount = Math.ceil(filteredExpressions.length / expressionsPerPage);
             if (pageCount <= 1) return;
 
             const prevButton = document.createElement('button');
@@ -264,16 +314,16 @@
         // --- Event Handlers ---
         form.addEventListener('submit', async (e) => {
             e.preventDefault();
-            if (!userId) {
-                showNotification("Error: Not authenticated. Please refresh.", true);
+            if (userId !== OWNER_USER_ID) {
+                showNotification("Error: You are not authorized to add expressions.", true);
                 return;
             }
             const title = form.title.value.trim();
             const code = form.expression.value.trim();
             if (title && code) {
                 try {
-                    const expressionsCollectionPath = `artifacts/${appId}/users/${userId}/expressions`;
-                    await addDoc(collection(db, expressionsCollectionPath), {
+                    const publicExpressionsPath = `artifacts/${appId}/public/data/expressions`;
+                    await addDoc(collection(db, publicExpressionsPath), {
                         title: title,
                         code: code,
                         createdAt: Date.now()
@@ -287,6 +337,8 @@
             }
         });
         
+        searchBox.addEventListener('input', filterAndRender);
+
         container.addEventListener('click', (e) => {
             if (e.target.classList.contains('copy-btn')) {
                 const codeToCopy = e.target.dataset.code;
@@ -306,7 +358,7 @@
                 document.body.removeChild(textArea);
             }
             
-            if (e.target.classList.contains('delete-btn')) {
+            if (e.target.classList.contains('delete-btn') && userId === OWNER_USER_ID) {
                 expressionIdToDelete = e.target.dataset.id;
                 deleteModal.classList.remove('hidden');
             }
@@ -319,9 +371,9 @@
         });
 
         modalConfirmBtn.addEventListener('click', async () => {
-            if (expressionIdToDelete && userId) {
+            if (expressionIdToDelete && userId === OWNER_USER_ID) {
                 try {
-                    const docPath = `artifacts/${appId}/users/${userId}/expressions/${expressionIdToDelete}`;
+                    const docPath = `artifacts/${appId}/public/data/expressions/${expressionIdToDelete}`;
                     await deleteDoc(doc(db, docPath));
                     showNotification('Expression deleted successfully.');
                 } catch (error) {
